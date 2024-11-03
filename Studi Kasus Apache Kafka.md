@@ -30,31 +30,37 @@ Filter data suhu yang berada di atas 80°C, sebagai indikator suhu yang perlu di
 4. Output dan Analisis:
     - Cetak data yang suhu-nya melebihi 80°C sebagai tanda peringatan sederhana di console.
 
+## Requirements
+- Docker
+- Java 21 / OpenJDK-21
+- Python 3.12 (cofluent-kafka, pyspark)
+
 ## 1. Buat Topik "sensor-suhu"
 - Pertama kita akan setup kafka untuk dijalankan di docker.
 ```yaml
+version: '3'
+
 services:
   zookeeper:
-    image: 'bitnami/zookeeper:latest'
-    container_name: zookeeper
-    environment:
-      - ALLOW_ANONYMOUS_LOGIN=yes
+    image: wurstmeister/zookeeper:latest
     ports:
-      - '2181:2181'
+      - "2181:2181"
 
   kafka:
-    image: 'bitnami/kafka:latest'
-    container_name: kafka
-    environment:
-      - KAFKA_BROKER_ID=1
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
-      - ALLOW_PLAINTEXT_LISTENER=yes
-      - KAFKA_LISTENERS=PLAINTEXT://:9092
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+    image: wurstmeister/kafka:latest
     ports:
-      - '9092:9092'
-    depends_on:
-      - zookeeper
+      - "9092:9092"
+    expose:
+      - "9093"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://kafka:9093,OUTSIDE://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "my-topic:1:1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 ```
 - Kemudian jalankan.
 ```bash
@@ -66,40 +72,43 @@ docker-compose up -d
 - Untuk membuat topik, jalankan perintah berikut
 
 ```bash
-docker exec -it kafka kafka-topics.sh --create --topic sensor-suhu --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+kafka docker exec -it <kafka-container-id> /opt/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper:2181 --replication-factor 1 --partitions 1 --topic sensor-suhu
 ```
-- Berhasil membuat topik "sensor suhu"
+- Berhasil membuat topik "sensor-suhu"
 ![alt text](/img/image1.png)
 
 ## 2. Simulasikan Data Suhu dengan Producer
 
-- Untuk membuat producer dan consumer, kita akan menggunakan kafka-python.
-![alt text](/img/image3.png)
+- Untuk membuat producer dan consumer, kita akan menggunakan cofluent-kafka.
 
 - Berikut adalah kode program kafka python:
 ```python
+from confluent_kafka import Producer
+import json
 import time
 import random
-from kafka import KafkaProducer
-import json
 
-# Koneksi ke Kafka
-producer = KafkaProducer(bootstrap_servers='localhost:9092',
-                         value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+# Producer
+conf = {'bootstrap.servers': 'localhost:9092'}
+producer = Producer(conf)
 
+# Random Temoerature Data Gen
 def generate_sensor_data(sensor_id):
-    # Mensimulasikan suhu antara 60°C - 100°C sebagai integer
     suhu = random.randint(60, 100)
     return {'sensor_id': sensor_id, 'suhu': suhu}
 
-sensor_ids = ['S1', 'S2', 'S3']  # Tiga sensor
+# Sensor IDs
+sensor_ids = ['S1', 'S2', 'S3']
 
+# Infinite Loop & Stream Data
 try:
     while True:
         for sensor_id in sensor_ids:
             data = generate_sensor_data(sensor_id)
-            producer.send('sensor-suhu', data)
-            print(f"Mengirim data: {data['sensor_id']} - {data['suhu']}°C")  # Menampilkan dengan "°C"
+            producer.produce('sensor-suhu', 
+                           value=json.dumps(data).encode('utf-8'))
+            print(f"Mengirim data: {data['sensor_id']} - {data['suhu']}°C")
+        producer.flush()
         time.sleep(1)
 except KeyboardInterrupt:
     producer.close()
@@ -116,13 +125,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, concat, lit
 from pyspark.sql.types import StructType, StringType, IntegerType
 
-# Membuat sesi Spark dengan konektor Kafka
+# Spark Session: Connect to Kafka
 spark = SparkSession.builder \
     .appName("SensorDataProcessor") \
     .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0") \
     .getOrCreate()
 
-# Mengonfigurasi Kafka stream
+# Kafka Stream
 sensor_data = spark \
     .readStream \
     .format("kafka") \
@@ -130,24 +139,24 @@ sensor_data = spark \
     .option("subscribe", "sensor-suhu") \
     .load()
 
-# Mendefinisikan skema data suhu
+# Schema
 schema = StructType() \
     .add("sensor_id", StringType()) \
     .add("suhu", IntegerType())
 
-# Mengonversi value dari Kafka (format biner) ke JSON
+# Cast data to JSON
 sensor_df = sensor_data \
     .selectExpr("CAST(value AS STRING) as json") \
     .select(from_json(col("json"), schema).alias("data")) \
     .select("data.sensor_id", "data.suhu")
 
-# Membuat kolom baru dengan satuan "°C"
+# Temperature Col "°C"
 sensor_df_with_unit = sensor_df.withColumn("suhu", concat(col("suhu"), lit("°C")))
 
-# Filter suhu > 80°C
+# Temperature Filter (Temperature > 80°C)
 alert_df = sensor_df_with_unit.filter(sensor_df.suhu > 80)
 
-# Menampilkan peringatan dengan suhu dalam "°C"
+# Alert
 query = alert_df \
     .select("sensor_id", "suhu") \
     .writeStream \
@@ -161,3 +170,9 @@ query.awaitTermination()
 ## 4. Output dan Analisis
 
 - Jalankan program producer dan consumer, kemudian perhatikan pesan yang ditampilkan
+
+### Producer
+![Producer](img/producer.png)
+
+### Consumer
+![Consumer](img/consumer.png)

@@ -2,13 +2,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, concat, lit
 from pyspark.sql.types import StructType, StringType, IntegerType
 
-# Membuat sesi Spark dengan konektor Kafka
+# Spark Session: Connect to Kafka
 spark = SparkSession.builder \
     .appName("SensorDataProcessor") \
     .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0") \
     .getOrCreate()
 
-# Mengonfigurasi Kafka stream
+# Kafka Stream
 sensor_data = spark \
     .readStream \
     .format("kafka") \
@@ -16,24 +16,24 @@ sensor_data = spark \
     .option("subscribe", "sensor-suhu") \
     .load()
 
-# Mendefinisikan skema data suhu
+# Schema
 schema = StructType() \
     .add("sensor_id", StringType()) \
     .add("suhu", IntegerType())
 
-# Mengonversi value dari Kafka (format biner) ke JSON
+# Cast data to JSON
 sensor_df = sensor_data \
     .selectExpr("CAST(value AS STRING) as json") \
     .select(from_json(col("json"), schema).alias("data")) \
     .select("data.sensor_id", "data.suhu")
 
-# Membuat kolom baru dengan satuan "°C"
+# Temperature Col "°C"
 sensor_df_with_unit = sensor_df.withColumn("suhu", concat(col("suhu"), lit("°C")))
 
-# Filter suhu > 80°C
+# Temperature Filter (Temperature > 80°C)
 alert_df = sensor_df_with_unit.filter(sensor_df.suhu > 80)
 
-# Menampilkan peringatan dengan suhu dalam "°C"
+# Alert
 query = alert_df \
     .select("sensor_id", "suhu") \
     .writeStream \
